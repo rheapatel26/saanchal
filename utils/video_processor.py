@@ -260,30 +260,139 @@ class VideoProcessor:
             self.cv_capture.release()
 
 
-def save_uploaded_video(uploaded_file) -> str:
+def save_uploaded_video(uploaded_file, videos_dir: str) -> Dict:
     """
-    Save uploaded Streamlit file to temporary location
+    Save uploaded Streamlit file to persistent location
     
     Args:
         uploaded_file: Streamlit UploadedFile object
+        videos_dir: Directory to save videos
         
     Returns:
-        Path to saved temporary file
+        Dictionary with file path and metadata
     """
-    # Create temporary file
+    # Create videos directory if it doesn't exist
+    os.makedirs(videos_dir, exist_ok=True)
+    
+    # Generate unique filename with timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    original_name = Path(uploaded_file.name).stem
     suffix = Path(uploaded_file.name).suffix
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    filename = f"{original_name}_{timestamp}{suffix}"
     
-    # Write uploaded file to temp location
-    temp_file.write(uploaded_file.read())
-    temp_file.close()
+    file_path = os.path.join(videos_dir, filename)
     
-    return temp_file.name
+    # Write uploaded file to persistent location
+    with open(file_path, 'wb') as f:
+        f.write(uploaded_file.read())
+    
+    # Get file metadata
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    
+    return {
+        "path": file_path,
+        "filename": filename,
+        "original_name": uploaded_file.name,
+        "size_mb": file_size_mb,
+        "upload_time": timestamp
+    }
+
+
+def get_video_library(videos_dir: str) -> List[Dict]:
+    """
+    Get list of all saved videos with metadata
+    
+    Args:
+        videos_dir: Directory containing videos
+        
+    Returns:
+        List of dictionaries with video metadata
+    """
+    if not os.path.exists(videos_dir):
+        return []
+    
+    videos = []
+    for filename in os.listdir(videos_dir):
+        if filename.endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            file_path = os.path.join(videos_dir, filename)
+            results_path = file_path.replace(Path(filename).suffix, '.json')
+            
+            # Get file metadata
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            mod_time = os.path.getmtime(file_path)
+            from datetime import datetime
+            upload_date = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M")
+            
+            videos.append({
+                "filename": filename,
+                "path": file_path,
+                "size_mb": file_size_mb,
+                "upload_date": upload_date,
+                "has_results": os.path.exists(results_path),
+                "results_path": results_path if os.path.exists(results_path) else None
+            })
+    
+    # Sort by modification time (newest first)
+    videos.sort(key=lambda x: os.path.getmtime(x["path"]), reverse=True)
+    
+    return videos
+
+
+def save_analysis_results(video_path: str, results: Dict):
+    """
+    Save analysis results as JSON alongside video
+    
+    Args:
+        video_path: Path to video file
+        results: Analysis results dictionary
+    """
+    import json
+    results_path = video_path.replace(Path(video_path).suffix, '.json')
+    
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+
+
+def load_analysis_results(video_path: str) -> Optional[Dict]:
+    """
+    Load previously saved analysis results
+    
+    Args:
+        video_path: Path to video file
+        
+    Returns:
+        Analysis results dictionary or None if not found
+    """
+    import json
+    results_path = video_path.replace(Path(video_path).suffix, '.json')
+    
+    if os.path.exists(results_path):
+        with open(results_path, 'r') as f:
+            return json.load(f)
+    return None
+
+
+def delete_video(video_path: str):
+    """
+    Delete video and associated results
+    
+    Args:
+        video_path: Path to video file
+    """
+    # Delete video file
+    if os.path.exists(video_path):
+        os.remove(video_path)
+    
+    # Delete results file
+    results_path = video_path.replace(Path(video_path).suffix, '.json')
+    if os.path.exists(results_path):
+        os.remove(results_path)
 
 
 def cleanup_temp_file(file_path: str):
     """
-    Remove temporary file
+    Remove temporary file (kept for backward compatibility)
     
     Args:
         file_path: Path to temporary file

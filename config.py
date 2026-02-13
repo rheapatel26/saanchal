@@ -9,6 +9,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FAST_VQA_DIR = os.path.join(BASE_DIR, "FAST-VQA-and-FasterVQA")
 PRETRAINED_WEIGHTS_DIR = os.path.join(BASE_DIR, "pretrained_weights")
 
+# Storage paths
+VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
+RESULTS_DIR = os.path.join(BASE_DIR, "videos")  # Results stored alongside videos
+
 # Model configuration
 MODEL_CONFIG = {
     "model_type": "FasterVQA",  # FasterVQA, FAST-VQA, FAST-VQA-M
@@ -50,6 +54,7 @@ THRESHOLDS = {
     # Resolution analysis
     "resolution": {
         "sharpness_threshold": 100.0,  # Laplacian variance for sharpness
+        "blur_threshold": 0.3,  # Blur score threshold (0-1, higher = more blurry)
     },
 }
 
@@ -66,4 +71,12 @@ UI_CONFIG = {
 VIDEO_CONFIG = {
     "sample_rate": 1,  # Process every Nth frame for temporal analysis
     "max_frames_for_analysis": 300,  # Limit frames for performance
+}
+
+# Groq API configuration
+GROQ_CONFIG = {
+    "api_key": os.getenv("GROQ_API_KEY"),
+    "model": "llama-3.3-70b-versatile",  # Using versatile model for better summaries
+    "temperature": 0.7,
+    "max_tokens": 1000,
 }

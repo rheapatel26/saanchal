@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from utils import VideoProcessor, Visualizer, save_uploaded_video, cleanup_temp_file
-from analyzers import QualityAnalyzer, ResolutionAnalyzer, TemporalAnalyzer, BlankFrameDetector
+from utils import VideoProcessor, Visualizer, save_uploaded_video, get_video_library, save_analysis_results, load_analysis_results, delete_video
+from analyzers import QualityAnalyzer, ResolutionAnalyzer, TemporalAnalyzer, BlankFrameDetector, SummaryGenerator
 
 
 # Page configuration
@@ -32,6 +32,12 @@ def initialize_session_state():
         st.session_state.results = None
     if 'video_path' not in st.session_state:
         st.session_state.video_path = None
+    if 'selected_video' not in st.session_state:
+        st.session_state.selected_video = None
+    if 'video_source' not in st.session_state:
+        st.session_state.video_source = None  # 'upload' or 'library'
+    if 'uploaded_filename' not in st.session_state:
+        st.session_state.uploaded_filename = None
 
 
 def run_analysis(video_path: str):
@@ -86,6 +92,20 @@ def run_analysis(video_path: str):
             results["blank_frames"] = blank_results
             st.success(f"✓ Frame Quality: {blank_results['quality']}")
         
+        # Generate Layman's Summary
+        with st.spinner("Generating summary with Groq Scout..."):
+            try:
+                summary_generator = SummaryGenerator()
+                summary_results = summary_generator.generate_summary(results)
+                results["layman_summary"] = summary_results
+                st.success("✓ Summary generated")
+            except Exception as e:
+                st.warning(f"⚠️ Could not generate summary: {str(e)}")
+                results["layman_summary"] = {
+                    "summary": "Summary generation unavailable. Please ensure GROQ_API_KEY is set.",
+                    "error": str(e)
+                }
+        
         return results
         
     except Exception as e:
@@ -128,26 +148,31 @@ def display_quality_tab(results):
 
 def display_resolution_tab(results):
     """Display resolution analysis results"""
-    st.header("📐 Resolution & Sharpness Analysis")
+    st.header("📐 Resolution, Sharpness & Blur Analysis")
     
     resolution = results["resolution"]
     metadata = results["metadata"]
     
     # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric("Resolution", resolution["nominal_resolution"])
     with col2:
         st.metric("Sharpness Quality", resolution["sharpness_quality"])
     with col3:
-        st.metric("Avg Sharpness", f"{resolution['average_sharpness']:.2f}")
+        st.metric("Blur Quality", resolution["blur_quality"])
     with col4:
-        st.metric("Edge Density", f"{resolution['average_edge_density']:.4f}")
+        st.metric("Avg Sharpness", f"{resolution['average_sharpness']:.2f}")
+    with col5:
+        st.metric("Avg Blur", f"{resolution['average_blur']:.3f}")
     
     # Warnings
     if resolution["potentially_upscaled"]:
         st.warning("⚠️ Video may be upscaled - low edge density for resolution")
+    
+    if resolution["has_excessive_blur"]:
+        st.warning("⚠️ Excessive blur detected - video may be out of focus or motion blurred")
     
     # Sharpness over time
     st.subheader("Sharpness Analysis Over Time")
@@ -160,6 +185,17 @@ def display_resolution_tab(results):
     )
     st.plotly_chart(fig, use_container_width=True)
     
+    # Blur over time
+    st.subheader("Blur Analysis Over Time")
+    fig_blur = Visualizer.create_temporal_plot(
+        resolution["frame_indices"],
+        resolution["blur_scores"],
+        "Frame Blur Score",
+        "Blur Score (0-1)",
+        threshold=config.THRESHOLDS["resolution"]["blur_threshold"]
+    )
+    st.plotly_chart(fig_blur, use_container_width=True)
+    
     # Detailed metrics
     st.subheader("Detailed Metrics")
     metrics_df = Visualizer.create_metrics_table({
@@ -169,8 +205,13 @@ def display_resolution_tab(results):
         "Min Sharpness": resolution["min_sharpness"],
         "Max Sharpness": resolution["max_sharpness"],
         "Sharpness Std Dev": resolution["sharpness_std"],
+        "Average Blur": resolution["average_blur"],
+        "Min Blur": resolution["min_blur"],
+        "Max Blur": resolution["max_blur"],
+        "Blur Std Dev": resolution["blur_std"],
         "Average Edge Density": resolution["average_edge_density"],
         "Potentially Upscaled": resolution["potentially_upscaled"],
+        "Has Excessive Blur": resolution["has_excessive_blur"],
     })
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
@@ -350,6 +391,26 @@ def display_summary_tab(results):
     """Display comprehensive summary"""
     st.header("📊 Analysis Summary")
     
+    # Layman's Summary Section
+    if "layman_summary" in results and "summary" in results["layman_summary"]:
+        st.subheader("🎯 Overall Assessment")
+        
+        summary_data = results["layman_summary"]
+        
+        # Display the summary in a nice container
+        if "error" not in summary_data:
+            st.markdown(summary_data["summary"])
+            
+            # Show model info in an expander
+            with st.expander("ℹ️ Summary Details"):
+                st.caption(f"Generated by: {summary_data.get('model_used', 'N/A')}")
+                if summary_data.get('tokens_used'):
+                    st.caption(f"Tokens used: {summary_data['tokens_used']}")
+        else:
+            st.info(summary_data["summary"])
+        
+        st.divider()
+    
     # Overall scores
     st.subheader("Overall Scores")
     
@@ -442,11 +503,60 @@ def main():
         
         st.divider()
         
+        # Video Library
+        st.header("📚 Video Library")
+        
+        video_library = get_video_library(config.VIDEOS_DIR)
+        
+        if video_library:
+            st.write(f"**{len(video_library)} video(s) saved**")
+            
+            for video in video_library:
+                with st.expander(f"📹 {video['filename'][:30]}..."):
+                    st.caption(f"📅 {video['upload_date']}")
+                    st.caption(f"💾 {video['size_mb']:.2f} MB")
+                    
+                    if video['has_results']:
+                        st.caption("✅ Analyzed")
+                    else:
+                        st.caption("⏳ Not analyzed")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Select", key=f"select_{video['filename']}"):
+                            st.session_state.selected_video = video
+                            st.session_state.video_path = video['path']
+                            st.session_state.video_source = 'library'
+                            
+                            # Load existing results if available
+                            if video['has_results']:
+                                st.session_state.results = load_analysis_results(video['path'])
+                                st.session_state.analysis_complete = True
+                            else:
+                                st.session_state.results = None
+                                st.session_state.analysis_complete = False
+                            
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("Delete", key=f"delete_{video['filename']}"):
+                            delete_video(video['path'])
+                            if st.session_state.video_path == video['path']:
+                                st.session_state.video_path = None
+                                st.session_state.selected_video = None
+                                st.session_state.results = None
+                                st.session_state.analysis_complete = False
+                            st.rerun()
+        else:
+            st.info("No videos saved yet")
+        
+        st.divider()
+        
         st.header("About")
         st.markdown("""
         This app analyzes:
         - **Quality**: FAST-VQA model score
-        - **Resolution**: Sharpness & clarity
+        - **Resolution**: Sharpness & blur
         - **Temporal**: Flickering & jitter
         - **Frames**: Blank/black/frozen detection
         """)
@@ -461,28 +571,52 @@ def main():
     )
     
     if uploaded_file is not None:
-        # Save uploaded file
-        if st.session_state.video_path is None or not os.path.exists(st.session_state.video_path):
+        # Check if this is a new upload (different file)
+        is_new_upload = (
+            st.session_state.video_source != 'upload' or 
+            st.session_state.uploaded_filename != uploaded_file.name
+        )
+        
+        # Save uploaded file permanently if it's a new upload
+        if is_new_upload:
             with st.spinner("Saving video..."):
-                video_path = save_uploaded_video(uploaded_file)
-                st.session_state.video_path = video_path
-        else:
-            video_path = st.session_state.video_path
+                video_info = save_uploaded_video(uploaded_file, config.VIDEOS_DIR)
+                st.session_state.video_path = video_info['path']
+                st.session_state.video_source = 'upload'
+                st.session_state.uploaded_filename = uploaded_file.name
+                st.session_state.selected_video = None
+                st.session_state.results = None
+                st.session_state.analysis_complete = False
+                st.success(f"✅ Video saved: {video_info['filename']}")
+        
+        video_path = st.session_state.video_path
         
         # Display video
         st.video(video_path)
         
+        # Check if analysis results exist
+        existing_results = load_analysis_results(video_path)
+        
+        if existing_results and not st.session_state.analysis_complete:
+            st.info("💡 This video has been analyzed before. Loading cached results...")
+            st.session_state.results = existing_results
+            st.session_state.analysis_complete = True
+        
         # Run analysis button
-        if st.button("🚀 Run Analysis", type="primary"):
+        button_label = "🔄 Re-analyze" if existing_results else "🚀 Run Analysis"
+        if st.button(button_label, type="primary"):
             st.session_state.analysis_complete = False
             st.session_state.results = None
             
             results = run_analysis(video_path)
             
             if results is not None:
+                # Save results
+                save_analysis_results(video_path, results)
+                
                 st.session_state.results = results
                 st.session_state.analysis_complete = True
-                st.success("✅ Analysis complete!")
+                st.success("✅ Analysis complete and saved!")
                 st.rerun()
         
         # Display results if available
@@ -513,8 +647,78 @@ def main():
             with tabs[4]:
                 display_blank_frames_tab(st.session_state.results)
     
+    elif st.session_state.selected_video is not None:
+        # Display selected video from library
+        video_path = st.session_state.video_path
+        
+        st.success(f"📹 Selected: {st.session_state.selected_video['filename']}")
+        
+        # Display video
+        st.video(video_path)
+        
+        # Run analysis button if not analyzed
+        if not st.session_state.analysis_complete:
+            if st.button("🚀 Run Analysis", type="primary"):
+                st.session_state.analysis_complete = False
+                st.session_state.results = None
+                
+                results = run_analysis(video_path)
+                
+                if results is not None:
+                    # Save results
+                    save_analysis_results(video_path, results)
+                    
+                    st.session_state.results = results
+                    st.session_state.analysis_complete = True
+                    st.success("✅ Analysis complete and saved!")
+                    st.rerun()
+        else:
+            # Show re-analyze option
+            if st.button("🔄 Re-analyze", type="secondary"):
+                st.session_state.analysis_complete = False
+                st.session_state.results = None
+                
+                results = run_analysis(video_path)
+                
+                if results is not None:
+                    # Save results
+                    save_analysis_results(video_path, results)
+                    
+                    st.session_state.results = results
+                    st.session_state.analysis_complete = True
+                    st.success("✅ Analysis complete and saved!")
+                    st.rerun()
+        
+        # Display results if available
+        if st.session_state.analysis_complete and st.session_state.results is not None:
+            st.divider()
+            
+            # Create tabs
+            tabs = st.tabs([
+                "📊 Summary",
+                "🎯 Quality",
+                "📐 Resolution",
+                "⏱️ Temporal",
+                "🎬 Blank Frames"
+            ])
+            
+            with tabs[0]:
+                display_summary_tab(st.session_state.results)
+            
+            with tabs[1]:
+                display_quality_tab(st.session_state.results)
+            
+            with tabs[2]:
+                display_resolution_tab(st.session_state.results)
+            
+            with tabs[3]:
+                display_temporal_tab(st.session_state.results)
+            
+            with tabs[4]:
+                display_blank_frames_tab(st.session_state.results)
+    
     else:
-        st.info("👆 Please upload a video file to begin analysis")
+        st.info("👆 Please upload a video file or select from library to begin analysis")
 
 
 if __name__ == "__main__":
