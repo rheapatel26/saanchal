@@ -76,11 +76,21 @@ class TemporalAnalyzer:
         else:
             dominant_frequency = 0.0
         
-        # Determine if flickering is present
+        # Determine if flickering is present (Enhanced with luminance jumps and flashes)
+        diffs = np.abs(np.diff(brightness_values))
+        spikes = np.where(diffs > 25.0)[0]  # Sudden luminance jump threshold
+        
+        # Detect alternating black/white frames (flashing)
+        binary = np.array(brightness_values) > 200
+        alternations = np.sum(binary[:-1] != binary[1:])
+        has_flashing = alternations > len(binary) * 0.1
+        
         has_flickering = (
             brightness_std > self.flicker_config["brightness_variance_threshold"] or
             len(spike_frames) > num_frames * 0.05 or  # More than 5% frames have spikes
-            dominant_frequency > self.flicker_config["frequency_threshold"]
+            dominant_frequency > self.flicker_config["frequency_threshold"] or
+            len(spikes) > num_frames * 0.03 or  # Sudden luminance jumps
+            has_flashing
         )
         
         # Severity assessment

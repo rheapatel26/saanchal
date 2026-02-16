@@ -220,7 +220,7 @@ class ResolutionAnalyzer:
         # Check for potential upscaling (low edge density with high resolution)
         nominal_pixels = metadata["width"] * metadata["height"]
         is_potentially_upscaled = (
-            nominal_pixels > 1920 * 1080 and avg_edge_density < 0.05
+            metadata["width"] >= 1920 and avg_edge_density < 0.05
         )
         
         # Check for excessive blur

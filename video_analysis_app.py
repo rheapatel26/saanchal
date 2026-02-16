@@ -7,6 +7,7 @@ import sys
 import os
 import json
 from pathlib import Path
+from typing import Dict, Any, Optional
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -39,6 +40,157 @@ def initialize_session_state():
     if 'uploaded_filename' not in st.session_state:
         st.session_state.uploaded_filename = None
 
+import math
+
+def calibrate_fastvqa(raw_score: float) -> float:
+    """
+    Convert FAST-VQA raw MOS-like score into perceptual 0-1 scale
+    """
+    # Clamp
+    raw_score = max(0.0, min(1.0, raw_score))
+
+    # Nonlinear sigmoid boost (fix low-score bias)
+    adjusted = 1 / (1 + math.exp(-6 * (raw_score - 0.45)))
+
+    return adjusted
+
+
+def calculate_perceptual_score(results: Dict) -> float:
+    """
+    Perceptual quality score - measures artifacts, compression, blur, temporal distortions
+    """
+    try:
+        # --- FAST VQA (calibrated)
+        raw_vqa = float(results["quality"]["quality_score"])
+        vqa_score = calibrate_fastvqa(raw_vqa)
+
+        # --- Sharpness normalization
+        avg_sharpness = float(results["resolution"]["average_sharpness"])
+        sharpness_score = min(1.0, avg_sharpness / 350.0)
+
+        # --- Blur penalty
+        blur = float(results["resolution"]["average_blur"])
+        blur_penalty = max(0.0, 1.0 - blur)
+
+        # --- Temporal score
+        temporal_quality = results["temporal"]["overall_temporal_quality"]
+        temporal_map = {
+            "Excellent": 1.0,
+            "Good": 0.85,
+            "Fair": 0.6,
+            "Poor": 0.3
+        }
+        temporal_score = temporal_map.get(temporal_quality, 0.6)
+
+        # --- Flicker penalty
+        flicker = results["temporal"]["flickering"]
+        flicker_penalty = 1.0 if not flicker["has_flickering"] else 0.7
+
+        # --- Jitter penalty
+        jitter = results["temporal"]["jitter"]
+        jitter_penalty = 1.0 if not jitter["has_jitter"] else 0.75
+
+        # --- Blank frame penalty
+        blank = results["blank_frames"]
+        blank_penalty = 1.0 - min(0.5, blank["black_percentage"] + blank["frozen_percentage"])
+
+        # ---- FINAL FUSION
+        final_score = (
+            0.35 * vqa_score +
+            0.20 * sharpness_score +
+            0.10 * blur_penalty +
+            0.15 * temporal_score +
+            0.05 * flicker_penalty +
+            0.05 * jitter_penalty +
+            0.10 * blank_penalty
+        )
+
+        return float(max(0.0, min(1.0, final_score)))
+
+    except Exception:
+        return float(results["quality"]["quality_score"])
+
+
+def calculate_technical_score(results: Dict) -> float:
+    """
+    Technical quality score - measures resolution, sharpness, bitrate, frame rate, motion, etc.
+    """
+    try:
+        metadata = results["metadata"]
+        resolution = results["resolution"]
+        temporal = results["temporal"]
+        blank = results["blank_frames"]
+        
+        # 1. Resolution score buckets
+        width = metadata["width"]
+        height = metadata["height"]
+        pixels = width * height
+        
+        if pixels >= 3840 * 2160:
+            resolution_score = 1.0
+        elif pixels >= 1920 * 1080:
+            resolution_score = 0.8
+        elif pixels >= 1280 * 720:
+            resolution_score = 0.6
+        else:
+            resolution_score = 0.4
+            
+        # 2. Sharpness score
+        sharpness = min(1.0, float(resolution["average_sharpness"]) / 350.0)
+        
+        # 3. Blur penalty
+        blur_val = float(resolution["average_blur"])
+        blur_penalty = max(0.0, 1.0 - blur_val)
+        
+        # 4. Motion stability
+        temporal_map = {
+            "Excellent": 1.0,
+            "Good": 0.85,
+            "Fair": 0.65,
+            "Poor": 0.4
+        }
+        motion = temporal_map.get(temporal["overall_temporal_quality"], 0.65)
+        
+        # 5. Flicker penalty
+        flicker = temporal["flickering"]
+        flicker_penalty = 1.0 if not flicker["has_flickering"] else 0.7
+        
+        # 6. Blank frame penalty
+        blank_penalty = 1.0 - min(0.5, blank["black_percentage"] + blank["frozen_percentage"])
+        
+        # ---- TECHNICAL FUSION (User defined weights)
+        technical = (
+            0.25 * resolution_score +
+            0.20 * sharpness +
+            0.15 * blur_penalty +
+            0.15 * motion +
+            0.10 * flicker_penalty +
+            0.15 * blank_penalty
+        )
+        
+        return float(max(0.0, min(1.0, technical)))
+    
+    except Exception:
+        return 0.5
+
+
+def calculate_overall_score(results: Dict) -> float:
+    """
+    Overall quality score - balanced fusion (60% technical, 40% perceptual)
+    """
+    perceptual = calculate_perceptual_score(results)
+    technical = calculate_technical_score(results)
+    
+    # User requested 0.6 Technical + 0.4 Perceptual (VQA)
+    overall = 0.6 * technical + 0.4 * perceptual
+    
+    return float(max(0.0, min(1.0, overall)))
+
+
+# Backward compatibility alias
+def calculate_composite_score(results: Dict) -> float:
+    """Legacy alias for calculate_overall_score"""
+    return calculate_overall_score(results)
 
 def run_analysis(video_path: str):
     """
@@ -69,7 +221,7 @@ def run_analysis(video_path: str):
             quality_analyzer = QualityAnalyzer()
             quality_results = quality_analyzer.analyze(video_processor.video_reader)
             results["quality"] = quality_results
-            st.success(f"✓ Quality Score: {quality_results['quality_score']:.4f} ({quality_results['interpretation']})")
+            st.success(f"✓ Quality Score: {quality_results['quality_score'] * 100:.1f}% ({quality_results['interpretation']})")
         
         # Resolution Analysis
         with st.spinner("Analyzing resolution and sharpness..."):
@@ -106,6 +258,9 @@ def run_analysis(video_path: str):
                     "error": str(e)
                 }
         
+        # Calculate composite score
+        results["composite_score"] = calculate_composite_score(results)
+        
         return results
         
     except Exception as e:
@@ -119,29 +274,78 @@ def display_quality_tab(results):
     """Display quality analysis results"""
     st.header("🎯 Video Quality Assessment")
     
+    # Calculate all scores
+    perceptual_score = calculate_perceptual_score(results)
+    technical_score = calculate_technical_score(results)
+    overall_score = calculate_overall_score(results)
+    
+    # Store for backward compatibility
+    results["composite_score"] = overall_score
+    results["perceptual_score"] = perceptual_score
+    results["technical_score"] = technical_score
+    
     quality = results["quality"]
     
-    # Display gauge
-    col1, col2 = st.columns([1, 1])
+    # Display three-score system
+    st.subheader("Quality Scores")
+    
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        fig = Visualizer.create_quality_gauge(quality["quality_score"])
-        st.plotly_chart(fig, use_container_width=True)
+        # Overall Score
+        st.metric("🏆 Overall Quality", f"{overall_score * 100:.1f}%")
+        if overall_score >= 0.75:
+            st.success("Excellent")
+        elif overall_score >= 0.5:
+            st.info("Good")
+        elif overall_score >= 0.25:
+            st.warning("Fair")
+        else:
+            st.error("Poor")
+        st.caption("Weighted Fusion: 60% Technical + 40% Perceptual")
     
     with col2:
-        st.metric("Quality Score", f"{quality['quality_score']:.4f}")
-        st.metric("Interpretation", quality["interpretation"])
-        st.metric("Model Used", quality["model_used"])
-        
-        # Description
-        st.info(quality["description"])
+        # Perceptual Score
+        st.metric("🎨 Perceptual Quality", f"{perceptual_score * 100:.1f}%")
+        if perceptual_score >= 0.75:
+            st.success("Clean")
+        elif perceptual_score >= 0.5:
+            st.info("Minor artifacts")
+        elif perceptual_score >= 0.25:
+            st.warning("Noticeable issues")
+        else:
+            st.error("Severe distortion")
+        st.caption("Artifacts, compression, and noise (FAST-VQA)")
+    
+    with col3:
+        # Technical Score
+        st.metric("⚙️ Technical Quality", f"{technical_score * 100:.1f}%")
+        if technical_score >= 0.75:
+            st.success("High specs")
+        elif technical_score >= 0.5:
+            st.info("Good specs")
+        elif technical_score >= 0.25:
+            st.warning("Moderate specs")
+        else:
+            st.error("Low specs")
+        st.caption("Resolution, Sharpness, Blur, Motion, and Frame Integrity")
+    
+    # Display gauge for overall score
+    st.subheader("Overall Quality Gauge")
+    fig = Visualizer.create_quality_gauge(overall_score)
+    st.plotly_chart(fig, use_container_width=True)
     
     # Additional metrics
     st.subheader("Detailed Metrics")
+    vqa_calibrated = calibrate_fastvqa(float(quality["quality_score"])) * 100
     metrics_df = Visualizer.create_metrics_table({
-        "Quality Score (0-1)": quality["quality_score"],
-        "Raw Model Score": quality["raw_score"],
-        "Quality Level": quality["interpretation"],
+        "Overall Quality (%)": overall_score * 100,
+        "Perceptual Quality (%)": perceptual_score * 100,
+        "Technical Quality (%)": technical_score * 100,
+        "Calibrated VQA (%)": vqa_calibrated,
+        "Raw FAST-VQA": float(quality["quality_score"]),
+        "Raw Model Score": float(quality["raw_score"]),
+        "Model Used": quality["model_used"],
     })
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
@@ -242,8 +446,11 @@ def display_temporal_tab(results):
     if flicker["has_flickering"]:
         st.warning(f"Flickering detected - Severity: {flicker['severity']}")
         st.write(f"- Number of brightness spikes: {flicker['num_spikes']}")
-        st.write(f"- Brightness variation (std): {flicker['brightness_std']:.2f}")
-        st.write(f"- Dominant frequency: {flicker['dominant_frequency']:.4f}")
+        # Defensive float conversion
+        b_std = float(flicker['brightness_std'])
+        d_freq = float(flicker['dominant_frequency'])
+        st.write(f"- Brightness variation (std): {b_std:.2f}")
+        st.write(f"- Dominant frequency: {d_freq:.4f}")
     else:
         st.success("✓ No flickering detected")
     
@@ -274,8 +481,11 @@ def display_temporal_tab(results):
     
     if jitter["has_jitter"]:
         st.warning(f"Jitter detected - Severity: {jitter['severity']}")
-        st.write(f"- Motion variation (std): {jitter['motion_std']:.2f}")
-        st.write(f"- Average SSIM: {jitter['ssim_mean']:.4f}")
+        # Fixed formatting crash by ensuring float conversion
+        m_std = float(jitter['motion_std'])
+        s_mean = float(jitter['ssim_mean'])
+        st.write(f"- Motion variation (std): {m_std:.2f}")
+        st.write(f"- Average SSIM: {s_mean:.4f}")
         st.write(f"- Sudden motion changes: {jitter['num_sudden_changes']}")
     else:
         st.success("✓ No jitter detected")
@@ -412,39 +622,80 @@ def display_summary_tab(results):
         st.divider()
     
     # Overall scores
-    st.subheader("Overall Scores")
+    st.subheader("Quality Scores")
     
-    col1, col2, col3, col4 = st.columns(4)
+    # Calculate all scores
+    perceptual_score = calculate_perceptual_score(results)
+    technical_score = calculate_technical_score(results)
+    overall_score = calculate_overall_score(results)
+    
+    # Store for backward compatibility
+    results["composite_score"] = overall_score
+    results["perceptual_score"] = perceptual_score
+    results["technical_score"] = technical_score
+    
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Quality", f"{results['quality']['quality_score']:.3f}")
-        st.caption(results['quality']['interpretation'])
+        st.metric("🏆 Overall", f"{overall_score * 100:.1f}%")
+        if overall_score >= 0.75: rating = "Excellent"
+        elif overall_score >= 0.5: rating = "Good"
+        elif overall_score >= 0.25: rating = "Fair"
+        else: rating = "Poor"
+        st.caption("60% Technical + 40% Perceptual")
     
     with col2:
-        st.metric("Sharpness", results['resolution']['sharpness_quality'])
-        st.caption(f"Avg: {results['resolution']['average_sharpness']:.1f}")
+        st.metric("🎨 Perceptual", f"{perceptual_score * 100:.1f}%")
+        if perceptual_score >= 0.75: p_rating = "Clean"
+        elif perceptual_score >= 0.5: p_rating = "Minor artifacts"
+        elif perceptual_score >= 0.25: p_rating = "Noticeable issues"
+        else: p_rating = "Severe distortion"
+        st.caption(p_rating)
     
     with col3:
+        st.metric("⚙️ Technical", f"{technical_score * 100:.1f}%")
+        if technical_score >= 0.75: t_rating = "High specs"
+        elif technical_score >= 0.5: t_rating = "Good specs"
+        elif technical_score >= 0.25: t_rating = "Moderate specs"
+        else: t_rating = "Low specs"
+        st.caption(t_rating)
+    
+    # Additional metrics
+    st.subheader("Component Scores")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Sharpness", results['resolution']['sharpness_quality'])
+        st.caption(f"Avg: {float(results['resolution']['average_sharpness']):.1f}")
+    
+    with col2:
         st.metric("Temporal", results['temporal']['overall_temporal_quality'])
         flicker_sev = results['temporal']['flickering']['severity']
         jitter_sev = results['temporal']['jitter']['severity']
         st.caption(f"F:{flicker_sev}, J:{jitter_sev}")
     
-    with col4:
+    with col3:
         st.metric("Frames", results['blank_frames']['quality'])
         st.caption(f"{results['blank_frames']['num_black_frames']}B, {results['blank_frames']['num_frozen_frames']}F")
     
     # Video metadata
     st.subheader("Video Information")
     metadata = results["metadata"]
-    info_df = Visualizer.create_metrics_table({
+    
+    # Add bitrate to display if available
+    info_dict = {
         "Resolution": f"{metadata['width']}x{metadata['height']}",
         "Frame Count": metadata['frame_count'],
         "Duration (seconds)": f"{metadata['duration']:.2f}",
         "FPS": f"{metadata['fps']:.2f}",
         "Codec": metadata['codec'],
         "File Size (MB)": f"{metadata['file_size_mb']:.2f}",
-    })
+    }
+    
+    if metadata.get("bitrate") and metadata["bitrate"]:
+        info_dict["Bitrate (Mbps)"] = f"{metadata['bitrate'] / 1_000_000:.2f}"
+    
+    info_df = Visualizer.create_metrics_table(info_dict)
     st.dataframe(info_df, use_container_width=True, hide_index=True)
     
     # Export results
@@ -467,9 +718,12 @@ def display_summary_tab(results):
         summary_text = f"""Video Quality Analysis Report
 ================================
 
-Quality Score: {results['quality']['quality_score']:.4f} ({results['quality']['interpretation']})
+Overall Quality Score: {results.get('composite_score', 0) * 100:.1f}%
+Perceptual Quality: {results.get('perceptual_score', 0) * 100:.1f}%
+Technical Quality: {results.get('technical_score', 0) * 100:.1f}%
+
 Resolution: {metadata['width']}x{metadata['height']}
-Sharpness: {results['resolution']['sharpness_quality']} (Avg: {results['resolution']['average_sharpness']:.2f})
+Sharpness: {results['resolution']['sharpness_quality']} (Avg: {float(results['resolution']['average_sharpness']):.2f})
 Temporal Quality: {results['temporal']['overall_temporal_quality']}
 Frame Quality: {results['blank_frames']['quality']}
 

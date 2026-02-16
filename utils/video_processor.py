@@ -9,6 +9,22 @@ import tempfile
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
+def convert_to_native_types(obj):
+    """Convert NumPy types to native Python types for JSON serialization"""
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_native_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_native_types(item) for item in obj]
+    return obj
+
 try:
     import decord
     HAS_DECORD = True
@@ -117,6 +133,7 @@ class VideoProcessor:
             "duration": 0.0,
             "codec": "",
             "file_size_mb": 0.0,
+            "bitrate": None,
         }
         
         # Calculate duration
@@ -127,9 +144,14 @@ class VideoProcessor:
         fourcc = int(self.cv_capture.get(cv2.CAP_PROP_FOURCC))
         metadata["codec"] = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
         
-        # Get file size
+        # Get file size and calculate bitrate
         if os.path.exists(self.video_path):
-            metadata["file_size_mb"] = os.path.getsize(self.video_path) / (1024 * 1024)
+            file_size_bytes = os.path.getsize(self.video_path)
+            metadata["file_size_mb"] = file_size_bytes / (1024 * 1024)
+            
+            # Calculate bitrate (bits per second)
+            if metadata["duration"] > 0:
+                metadata["bitrate"] = int((file_size_bytes * 8) / metadata["duration"])
         
         return metadata
     
@@ -350,8 +372,11 @@ def save_analysis_results(video_path: str, results: Dict):
     import json
     results_path = video_path.replace(Path(video_path).suffix, '.json')
     
+    # Convert NumPy types to native Python types
+    clean_results = convert_to_native_types(results)
+    
     with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
+        json.dump(clean_results, f, indent=2)
 
 
 def load_analysis_results(video_path: str) -> Optional[Dict]:
@@ -365,6 +390,8 @@ def load_analysis_results(video_path: str) -> Optional[Dict]:
         Analysis results dictionary or None if not found
     """
     import json
+    if not video_path:
+        return None
     results_path = video_path.replace(Path(video_path).suffix, '.json')
     
     if os.path.exists(results_path):

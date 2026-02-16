@@ -36,26 +36,26 @@ class Visualizer:
         
         fig = go.Figure(go.Indicator(
             mode="gauge+number+delta",
-            value=score,
+            value=score * 100,
             domain={'x': [0, 1], 'y': [0, 1]},
             title={'text': title, 'font': {'size': 24}},
-            number={'suffix': "", 'font': {'size': 40}},
+            number={'suffix': "%", 'font': {'size': 40}},
             gauge={
-                'axis': {'range': [0, 1], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
                 'bar': {'color': color},
                 'bgcolor': "white",
                 'borderwidth': 2,
                 'bordercolor': "gray",
                 'steps': [
-                    {'range': [0, 0.25], 'color': '#ffcccc'},
-                    {'range': [0.25, 0.5], 'color': '#ffffcc'},
-                    {'range': [0.5, 0.75], 'color': '#ccffcc'},
-                    {'range': [0.75, 1], 'color': '#ccffcc'}
+                    {'range': [0, 25], 'color': '#ffcccc'},
+                    {'range': [25, 50], 'color': '#ffffcc'},
+                    {'range': [50, 75], 'color': '#ccffcc'},
+                    {'range': [75, 100], 'color': '#ccffcc'}
                 ],
                 'threshold': {
                     'line': {'color': "red", 'width': 4},
                     'thickness': 0.75,
-                    'value': 0.5
+                    'value': 50
                 }
             }
         ))

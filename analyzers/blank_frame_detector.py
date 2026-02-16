@@ -5,6 +5,7 @@ Detects blank, black, white, and frozen frames in video
 import cv2
 import numpy as np
 from typing import Dict, List, Tuple
+from skimage.metrics import structural_similarity as ssim
 import config
 
 
@@ -77,13 +78,13 @@ class BlankFrameDetector:
         diff = np.abs(frame1.astype(float) - frame2.astype(float))
         return np.mean(diff)
     
-    def detect_frozen_frames(self, frames: np.ndarray, threshold: float = 1.0) -> List[int]:
+    def detect_frozen_frames(self, frames: np.ndarray, threshold: float = 0.995) -> List[int]:
         """
-        Detect frozen frames by comparing consecutive frames
+        Detect frozen frames by comparing consecutive frames using SSIM
         
         Args:
             frames: Video frames as numpy array (N, H, W, C)
-            threshold: Difference threshold for frozen detection
+            threshold: SSIM threshold (higher means more similar)
             
         Returns:
             List of frozen frame indices
@@ -91,8 +92,12 @@ class BlankFrameDetector:
         frozen_frames = []
         
         for i in range(len(frames) - 1):
-            diff = self.calculate_frame_difference(frames[i], frames[i + 1])
-            if diff < threshold:
+            # Convert to grayscale for SSIM
+            gray1 = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
+            gray2 = cv2.cvtColor(frames[i+1], cv2.COLOR_RGB2GRAY)
+            
+            similarity = ssim(gray1, gray2, data_range=255)
+            if similarity > threshold:
                 frozen_frames.append(i + 1)
         
         return frozen_frames

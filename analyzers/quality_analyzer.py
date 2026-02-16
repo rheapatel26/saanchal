@@ -193,14 +193,14 @@ class QualityAnalyzer:
                 # Rescale to 0-1
                 quality_score = self._sigmoid_rescale(raw_score)
                 
-                # Interpret score
-                if quality_score >= 0.75:
+                # Interpret score (Updated to be more lenient)
+                if quality_score >= 0.8:
                     interpretation = "Excellent"
                     description = "Very high quality video with minimal distortions"
-                elif quality_score >= 0.5:
+                elif quality_score >= 0.6:
                     interpretation = "Good"
                     description = "Good quality video with minor distortions"
-                elif quality_score >= 0.25:
+                elif quality_score >= 0.4:
                     interpretation = "Fair"
                     description = "Acceptable quality with noticeable distortions"
                 else:
@@ -228,11 +228,11 @@ class QualityAnalyzer:
         Returns:
             Interpretation string
         """
-        if score >= 0.75:
+        if score >= 0.8:
             return "Excellent"
-        elif score >= 0.5:
+        elif score >= 0.6:
             return "Good"
-        elif score >= 0.25:
+        elif score >= 0.4:
             return "Fair"
         else:
             return "Poor"
