@@ -14,7 +14,8 @@ class ResolutionAnalyzer:
     def __init__(self):
         """Initialize resolution analyzer"""
         self.sharpness_threshold = config.THRESHOLDS["resolution"]["sharpness_threshold"]
-        self.blur_threshold = config.THRESHOLDS["resolution"]["blur_threshold"]
+        self.blur_threshold = 0.35
+
     
     def calculate_sharpness(self, frame: np.ndarray) -> float:
         """
@@ -40,51 +41,42 @@ class ResolutionAnalyzer:
     
     def calculate_blur_fft(self, frame: np.ndarray) -> float:
         """
-        Calculate blur using FFT (Frequency Domain Analysis)
-        High-frequency content indicates sharp edges, low indicates blur
-        
-        Args:
-            frame: Frame as numpy array (H, W, C) in RGB or BGR
-            
-        Returns:
-            Blur score (0-1, where 1 is very blurry)
+        Improved FFT blur detection with log scaling
+        Returns blur score in range [0, 1] where:
+        0 = very sharp
+        1 = very blurry
         """
-        # Convert to grayscale if needed
         if len(frame.shape) == 3:
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         else:
             gray = frame
-        
-        # Apply FFT
+
+        # FFT
         fft = np.fft.fft2(gray)
         fft_shift = np.fft.fftshift(fft)
-        magnitude_spectrum = np.abs(fft_shift)
-        
-        # Calculate center and radius for high-frequency region
+        magnitude = np.log(1 + np.abs(fft_shift))   # ✅ log scaling
+
         rows, cols = gray.shape
         crow, ccol = rows // 2, cols // 2
-        
-        # Define high-frequency region (outer 30% of spectrum)
-        radius = int(min(rows, cols) * 0.35)
-        
-        # Create mask for high frequencies (inverse of low-pass filter)
+
+        # Low frequency mask (center region)
+        radius = int(min(rows, cols) * 0.1)
         y, x = np.ogrid[:rows, :cols]
-        mask = np.sqrt((x - ccol)**2 + (y - crow)**2) > radius
-        
-        # Calculate energy in high frequencies vs total energy
-        high_freq_energy = np.sum(magnitude_spectrum[mask])
-        total_energy = np.sum(magnitude_spectrum)
-        
-        # Normalize to 0-1 (invert so higher = more blurry)
-        if total_energy > 0:
-            high_freq_ratio = high_freq_energy / total_energy
-            # Invert and scale: sharp images have high ratio, blurry have low
-            blur_score = 1.0 - min(1.0, high_freq_ratio * 10)  # Scale factor
-        else:
-            blur_score = 1.0  # Completely blurry if no energy
-        
+        low_freq_mask = ((x - ccol)**2 + (y - crow)**2) <= radius**2
+
+        low_energy = np.sum(magnitude[low_freq_mask])
+        total_energy = np.sum(magnitude)
+
+        if total_energy == 0:
+            return 1.0
+
+        low_ratio = low_energy / total_energy
+
+        # Normalize → higher low_ratio = blurrier
+        blur_score = min(1.0, low_ratio * 3.0)
+
         return blur_score
-    
+
     def detect_edges(self, frame: np.ndarray) -> np.ndarray:
         """
         Detect edges in frame using Canny edge detection
@@ -208,14 +200,15 @@ class ResolutionAnalyzer:
             sharpness_quality = "Poor"
         
         # Determine overall blur quality (inverted - lower blur is better)
-        if avg_blur <= self.blur_threshold * 0.5:
+        if avg_blur < 0.20:
             blur_quality = "Excellent"
-        elif avg_blur <= self.blur_threshold:
+        elif avg_blur < 0.35:
             blur_quality = "Good"
-        elif avg_blur <= self.blur_threshold * 1.5:
+        elif avg_blur < 0.55:
             blur_quality = "Fair"
         else:
             blur_quality = "Poor"
+
         
         # Check for potential upscaling (low edge density with high resolution)
         nominal_pixels = metadata["width"] * metadata["height"]
@@ -223,6 +216,24 @@ class ResolutionAnalyzer:
             metadata["width"] >= 1920 and avg_edge_density < 0.05
         )
         
+        # Calculate Clarity Score (Fusion of Sharpness & Blur)
+        clarity_score = (
+            0.6 * min(1.0, avg_sharpness / 350.0) +
+            0.4 * (1.0 - avg_blur)
+        )
+        
+        if clarity_score > 0.8:
+            clarity_quality = "Excellent"
+        elif clarity_score > 0.6:
+            clarity_quality = "Good"
+        elif clarity_score > 0.4:
+            clarity_quality = "Fair"
+        else:
+            clarity_quality = "Poor"
+
+        # Detect Over-sharpening
+        is_oversharpened = (avg_sharpness > 600 and avg_edge_density < 0.03)
+
         # Check for excessive blur
         has_excessive_blur = avg_blur > self.blur_threshold * 1.5
         
@@ -241,9 +252,12 @@ class ResolutionAnalyzer:
             "max_blur": max_blur,
             "blur_std": std_blur,
             "blur_quality": blur_quality,
+            "clarity_score": clarity_score,
+            "clarity_quality": clarity_quality,
             "has_excessive_blur": has_excessive_blur,
             "average_edge_density": avg_edge_density,
             "potentially_upscaled": is_potentially_upscaled,
+            "is_oversharpened": is_oversharpened,
             "sharpness_scores": sharpness_scores,
             "blur_scores": blur_scores,
             "frame_indices": sample_indices.tolist(),

@@ -54,7 +54,7 @@ THRESHOLDS = {
     # Resolution analysis
     "resolution": {
         "sharpness_threshold": 100.0,  # Laplacian variance for sharpness
-        "blur_threshold": 0.3,  # Blur score threshold (0-1, higher = more blurry)
+        "blur_threshold": 0.35,  # Blur score threshold (0-1, higher = more blurry)
     },
 }
 
